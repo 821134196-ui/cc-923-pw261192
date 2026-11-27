@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>多级降级演练台 · 连接池/熔断/恢复核对</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">降级</div>
+        <div>
+          <h1>本地样例服务 · 多级降级演练台</h1>
+          <p class="subtitle">
+            下游级舱壁隔离 ｜ 必要请求优先 ｜ 区分「连接池排队」与「真实下游失败」 ｜ 半开探测 + 迟滞防恢复振荡
+          </p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <label class="switch">
+          <input type="checkbox" id="auto-refresh" checked />
+          <span>1s 自动刷新</span>
+        </label>
+        <button class="btn" id="btn-recover-all" data-testid="btn-recover-all">全部解除故障</button>
+        <button class="btn btn-ghost" id="btn-reset" data-testid="btn-reset">重置全部状态</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- ============ 自动核对演练 ============ -->
+      <section class="panel drills" data-testid="drill-panel">
+        <div class="panel-head drill-head">
+          <div>
+            <h2>故障演练与自动核对</h2>
+            <p>点击任一剧本，页面会真实注入故障、发送不同请求，并核对「用了哪种响应、何时恢复」。</p>
+          </div>
+          <button class="btn btn-primary" id="btn-drill-all" data-testid="drill-all">依次运行全部剧本</button>
+        </div>
+        <div class="drill-grid">
+          <button class="drill-card" data-drill="isolation" data-testid="drill-isolation">
+            <strong>① 单下游故障隔离</strong>
+            <span>打挂推荐服务 → 推荐降级/熔断，连续请求用户服务核对仍为 L0 实时响应，随后核对恢复。</span>
+          </button>
+          <button class="drill-card" data-drill="queue" data-testid="drill-queue">
+            <strong>② 排队 ≠ 下游失败</strong>
+            <span>调小商品连接池 + 慢响应，突发并发制造排队超时，核对原因是 pool_queue_timeout 且熔断器不打开。</span>
+          </button>
+          <button class="drill-card" data-drill="priority" data-testid="drill-priority">
+            <strong>③ 必要请求优先</strong>
+            <span>同一订单连接池内混合突发 P0/P2，核对 P0 全部拿到真实响应，P2 被排队牺牲或限流丢弃。</span>
+          </button>
+          <button class="drill-card" data-drill="flap" data-testid="drill-flap">
+            <strong>④ 防恢复振荡</strong>
+            <span>打开熔断后探测：失败→重新熔断并加倍冷却；单次成功不恢复，连续 2 次成功才关闭，记录恢复时刻。</span>
+          </button>
+        </div>
+        <div class="drill-report" data-testid="drill-report" id="drill-report">
+          <div class="drill-report-empty">尚未运行演练。选择上方剧本开始自动核对，结果与证据会显示在这里。</div>
+        </div>
+      </section>
+
+      <!-- ============ 下游状态卡片 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>下游与舱壁状态（每下游独立连接池 / 熔断器）</h2>
+          <p class="hint">在任意卡片上注入故障，观察熔断器、连接池压力与指标变化；故障只影响对应下游的接口。</p>
+        </div>
+        <div class="ds-grid" id="ds-grid" data-testid="ds-grid"></div>
+      </section>
+
+      <!-- ============ 请求台 + 响应核对 ============ -->
+      <section class="workbench">
+        <div class="panel request-panel">
+          <div class="panel-head"><h2>发送不同请求</h2></div>
+          <div class="req-buttons" id="req-buttons">
+            <button class="req-btn p0" data-req="user" data-testid="req-user">
+              <b>用户资料</b><span>/api/user/u_1001 · P0 必要</span>
+            </button>
+            <button class="req-btn p0" data-req="orders" data-testid="req-orders">
+              <b>订单列表</b><span>/api/orders · P0 必要</span>
+            </button>
+            <button class="req-btn p1" data-req="product" data-testid="req-product">
+              <b>商品详情</b><span>/api/product/p_88 · P1 普通</span>
+            </button>
+            <button class="req-btn p1" data-req="inventory" data-testid="req-inventory">
+              <b>库存查询</b><span>/api/inventory/SKU-88-BLK · P1 普通</span>
+            </button>
+            <button class="req-btn p2" data-req="recommend" data-testid="req-recommend">
+              <b>个性化推荐</b><span>/api/recommend · P2 可降级</span>
+            </button>
+            <button class="req-btn agg" data-req="home" data-testid="req-home">
+              <b>首页聚合</b><span>/api/home · 三板块独立降级</span>
+            </button>
+          </div>
+
+          <div class="burst-box">
+            <h3>并发突发 / 优先级混合演练（真实 HTTP）</h3>
+            <div class="burst-controls">
+              <label>目标下游
+                <select id="burst-ds" data-testid="burst-ds">
+                  <option value="order">order 订单(P0池)</option>
+                  <option value="product" selected>product 商品</option>
+                  <option value="recommend">recommend 推荐(P2池)</option>
+                  <option value="inventory">inventory 库存</option>
+                  <option value="user">user 用户</option>
+                </select>
+              </label>
+              <label>数量 <input type="number" id="burst-count" value="8" min="1" max="40" /></label>
+              <label>优先级
+                <select id="burst-priority">
+                  <option value="0">P0 必要</option>
+                  <option value="1" selected>P1 普通</option>
+                  <option value="2">P2 可降级</option>
+                </select>
+              </label>
+              <button class="btn btn-primary" id="btn-burst" data-testid="btn-burst">并发发送</button>
+            </div>
+            <div class="burst-controls mixed">
+              <span>混合突发（同一连接池）：</span>
+              <button class="btn" id="btn-mixed-burst" data-testid="btn-mixed-burst">6×P2 + 2×P0</button>
+              <span class="hint">建议先在订单/商品卡片套用「变慢（排队）」或「极限高压」预设</span>
+            </div>
+            <div class="burst-tally" id="burst-tally" data-testid="burst-tally"></div>
+          </div>
+        </div>
+
+        <div class="panel response-panel">
+          <div class="panel-head">
+            <h2>本次响应核对</h2>
+            <p class="hint" id="response-hint">点击左侧请求按钮后，这里显示响应来源、降级级别、原因分类与耗时。</p>
+          </div>
+          <div id="last-response" data-testid="last-response" class="last-response">
+            <div class="placeholder">尚未发送请求</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 请求记录 + 时间线 ============ -->
+      <section class="bottom-grid">
+        <div class="panel">
+          <div class="panel-head"><h2>最近请求记录</h2><p class="hint">服务端内存保留最近 100 条，刷新页面后仍可核对。</p></div>
+          <div class="table-wrap">
+            <table class="history-table">
+              <thead>
+                <tr><th>时间</th><th>接口</th><th>优先级</th><th>HTTP</th><th>级别</th><th>响应来源</th><th>原因</th><th>排队/总耗时</th><th>熔断</th></tr>
+              </thead>
+              <tbody id="history-body" data-testid="history-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>故障 / 降级 / 恢复时间线</h2><p class="hint" id="timeline-hint">记录熔断打开、半开探测、恢复关闭与恢复耗时。</p></div>
+          <ul class="timeline" id="timeline" data-testid="timeline"></ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>零依赖 Node 服务 · API 前缀 /api · 自动化核对：<code>npm run verify</code> 与 <code>npm test</code></span>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
